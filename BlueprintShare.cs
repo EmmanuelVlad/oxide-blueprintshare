@@ -53,9 +53,10 @@ namespace Oxide.Plugins
 
                 if (string.IsNullOrEmpty(itemShortName)) return;
 
-                item.Remove();
-
-                UnlockBlueprint(player, itemShortName);
+                if (UnlockBlueprint(player, itemShortName))
+				{
+                	item.Remove();
+				}
             }
         }
 
@@ -102,14 +103,14 @@ namespace Oxide.Plugins
 
         #region General Methods
 
-        private void UnlockBlueprint(BasePlayer player, string itemShortName)
+        private bool UnlockBlueprint(BasePlayer player, string itemShortName)
         {
-            if (player == null) return;
-            if (string.IsNullOrEmpty(itemShortName)) return;
+			bool someoneLearnedTheBlueprint = false;
+            ulong playerUID = player.userID;
+            List<BasePlayer> playersToShareWith = new List<BasePlayer>();
+			ItemDefinition itemDefinition = GetItemDefinition(itemShortName);
 
-            var playerUID = player.userID;
-
-            var playersToShareWith = new List<BasePlayer>();
+			if (itemDefinition == null) return false;
 
             if (clansEnabled && (Clans != null || ClansReborn != null) && InClan(playerUID))
             {
@@ -128,30 +129,21 @@ namespace Oxide.Plugins
 
             foreach (BasePlayer sharePlayer in playersToShareWith)
             {
-                if (sharePlayer != null)
-                {
-                    var blueprintComponent = sharePlayer.blueprints;
-
-                    if (blueprintComponent == null) return;
-
-                    var itemDefinition = GetItemDefinition(itemShortName);
-
-                    if (itemDefinition == null) return;
-
-                    blueprintComponent.Unlock(itemDefinition);
-
-					if (player.userID != sharePlayer.userID)
-					{
-						sharePlayer.Command("chat.add", 0, 0, GetLangValue("NewBlueprintLearned", sharePlayer.UserIDString, player.displayName, itemDefinition.displayName.translated));
-					}
-
-                    var soundEffect = new Effect("assets/prefabs/deployable/research table/effects/research-success.prefab", sharePlayer.transform.position, Vector3.zero);
-
-                    if (soundEffect == null) return;
-
-                    EffectNetwork.Send(soundEffect, sharePlayer.net.connection);
-                }
+                if (sharePlayer == null || sharePlayer.blueprints.HasUnlocked(itemDefinition))
+					continue;
+				
+				someoneLearnedTheBlueprint = true;
+				sharePlayer.blueprints.Unlock(itemDefinition);
+				if (player.userID != sharePlayer.userID) {
+					sharePlayer.Command("chat.add", 0, 0, GetLangValue("NewBlueprintLearned", sharePlayer.UserIDString, player.displayName, itemDefinition.displayName.translated));
+				}
+				EffectNetwork.Send(
+					new Effect("assets/prefabs/deployable/research table/effects/research-success.prefab", sharePlayer.transform.position, Vector3.zero),
+					sharePlayer.net.connection
+				);
             }
+
+			return someoneLearnedTheBlueprint;
         }
 
         private ItemDefinition GetItemDefinition(string itemShortName)
