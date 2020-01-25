@@ -1,6 +1,5 @@
 using Newtonsoft.Json.Linq;
 using Oxide.Core;
-using Oxide.Core.Configuration;
 using Oxide.Core.Libraries.Covalence;
 using Oxide.Core.Plugins;
 using Oxide.Game.Rust;
@@ -10,7 +9,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("Blueprint Share", "c_creep", "1.1.3")]
+    [Info("Blueprint Share", "c_creep & evlad", "1.2.0")]
     [Description("Allows players to share researched blueprints with their friends, clan or team")]
 
     class BlueprintShare : CovalencePlugin
@@ -19,11 +18,29 @@ namespace Oxide.Plugins
 
         [PluginReference] private Plugin Clans, ClansReborn, Friends;
 
-		private List<string> playersDataList = new List<string>();
+        private bool clansEnabled = true, friendsEnabled = true, teamsEnabled = true, enabledByDefault = true;
 
-        private DynamicConfigFile playersData;
+		private class StoredData
+		{
+			private string FileName = "BlueprintShare";
+			public Dictionary<string, List<string>> Offline = new Dictionary<string, List<string>>();
+			public List<string> Toggle = new List<string>();
 
-        private bool sharingEnabled = true, clansEnabled = true, friendsEnabled = true, teamsEnabled = true, enabledByDefault = true;
+			public StoredData()
+			{
+			}
+
+			public StoredData Read()
+			{
+				return Interface.Oxide.DataFileSystem.ReadObject<StoredData>(FileName);
+			}
+
+			public void Write()
+			{
+				Interface.Oxide.DataFileSystem.WriteObject(FileName, this);
+			}
+		}
+		private StoredData storedData;
 
         #endregion
 
@@ -35,19 +52,42 @@ namespace Oxide.Plugins
 
             LoadDefaultConfig();
 
-            playersData = Interface.Oxide.DataFileSystem.GetFile("BlueprintShare");
-
-            playersDataList = playersData.ReadObject<List<string>>();
+			storedData = Interface.Oxide.DataFileSystem.ReadObject<StoredData>("BlueprintShare");
         }
+		
 
         private void OnPlayerInit(BasePlayer player)
         {
-			sharingEnabled = playersDataList.Contains(player.UserIDString) ? !enabledByDefault : enabledByDefault;
+			if (storedData.Offline.ContainsKey(player.UserIDString))
+			{
+				if (SharingEnabled(player.UserIDString))
+				{
+					bool hasUnlockedAtLeastOne = false;
+					foreach (var itemShortName in storedData.Offline[player.UserIDString])
+					{
+						ItemDefinition blueprint = GetItemDefinition(itemShortName);
+						if (player.blueprints.HasUnlocked(blueprint))
+							continue;
+						hasUnlockedAtLeastOne = true;
+						player.blueprints.Unlock(blueprint);
+						player.Command("chat.add", 0, 0, GetLangValue("NewBlueprintLearned", player.UserIDString, player.displayName, blueprint.displayName.translated));
+					}
+					if (hasUnlockedAtLeastOne)
+					{
+						EffectNetwork.Send(
+							new Effect("assets/prefabs/deployable/research table/effects/research-success.prefab", player.transform.position, Vector3.zero),
+							player.net.connection
+						);
+					}
+				}
+				storedData.Offline.Remove(player.UserIDString);
+				storedData.Write();
+			}
         }
 
         private void OnItemAction(Item item, string action, BasePlayer player)
         {
-            if (player != null && action == "study" && (InClan(player.userID) || HasFriends(player.userID) || InTeam(player.userID)) && item.IsBlueprint() && sharingEnabled)
+            if (player != null && action == "study" && (InClan(player.userID) || HasFriends(player.userID) || InTeam(player.userID)) && item.IsBlueprint() && SharingEnabled(player.UserIDString))
             {
                 var itemShortName = item.blueprintTargetDef.shortname;
 
@@ -107,7 +147,8 @@ namespace Oxide.Plugins
         {
 			bool someoneLearnedTheBlueprint = false;
             ulong playerUID = player.userID;
-            List<BasePlayer> playersToShareWith = new List<BasePlayer>();
+            List<ulong> playersToShareWith = new List<ulong>();
+			List<ulong> offlinePlayers = new List<ulong>();
 			ItemDefinition itemDefinition = GetItemDefinition(itemShortName);
 
 			if (itemDefinition == null) return false;
@@ -127,11 +168,13 @@ namespace Oxide.Plugins
                 playersToShareWith.AddRange(GetTeamMembers(playerUID));
             }
 
-            foreach (BasePlayer sharePlayer in playersToShareWith)
+            foreach (ulong sharePlayerID in playersToShareWith)
             {
-                if (sharePlayer == null || sharePlayer.blueprints.HasUnlocked(itemDefinition))
+				BasePlayer sharePlayer = RustCore.FindPlayerById(sharePlayerID);
+				if (sharePlayer == null || !sharePlayer.IsConnected)
+					offlinePlayers.Add(sharePlayerID);
+                if (sharePlayer == null || !sharePlayer.IsConnected || sharePlayer.blueprints.HasUnlocked(itemDefinition) || !SharingEnabled(sharePlayer.UserIDString))
 					continue;
-				
 				someoneLearnedTheBlueprint = true;
 				sharePlayer.blueprints.Unlock(itemDefinition);
 				if (player.userID != sharePlayer.userID) {
@@ -142,6 +185,14 @@ namespace Oxide.Plugins
 					sharePlayer.net.connection
 				);
             }
+			if (someoneLearnedTheBlueprint)
+			{
+				foreach (ulong sharePlayerID in offlinePlayers)
+				{
+					AddBlueprintToOfflinePlayer(sharePlayerID.ToString(), itemShortName);
+				}
+				storedData.Write();
+			}
 
 			return someoneLearnedTheBlueprint;
         }
@@ -154,6 +205,19 @@ namespace Oxide.Plugins
 
             return itemDefinition;
         }
+
+		private bool AddBlueprintToOfflinePlayer(string playerID, string itemShortName)
+		{
+			if (!storedData.Offline.ContainsKey(playerID)) {
+				storedData.Offline.Add(playerID, new List<string>(){itemShortName});
+				return true;
+			}
+			if (!storedData.Offline[playerID].Contains(itemShortName)) {
+				storedData.Offline[playerID].Add(itemShortName);
+				return true;
+			}
+			return false;
+		}
 
         #endregion
 
@@ -168,9 +232,9 @@ namespace Oxide.Plugins
             return clanName != null;
         }
 
-        private List<BasePlayer> GetClanMembers(ulong playerUID)
+        private List<ulong> GetClanMembers(ulong playerUID)
         {
-            var membersList = new List<BasePlayer>();
+            var membersList = new List<ulong>();
 
             var clanName = Clans?.Call<string>("GetClanOf", playerUID);
 
@@ -190,9 +254,7 @@ namespace Oxide.Plugins
 
                             if (!ulong.TryParse(member.ToString(), out clanMemberUID)) continue;
 
-                            var clanMember = RustCore.FindPlayerById(clanMemberUID);
-
-                            membersList.Add(clanMember);
+                            membersList.Add(clanMemberUID);
                         }
                     }
                 }
@@ -213,20 +275,9 @@ namespace Oxide.Plugins
             return friendsList != null && friendsList.Length != 0;
         }
 
-        private List<BasePlayer> GetFriends(ulong playerUID)
+        private List<ulong> GetFriends(ulong playerUID)
         {
-            var friendsList = new List<BasePlayer>();
-
-            var friends = Friends.Call<ulong[]>("GetFriends", playerUID);
-
-            foreach (var friendUID in friends)
-            {
-                var friend = RustCore.FindPlayerById(friendUID);
-
-                friendsList.Add(friend);
-            }
-
-            return friendsList;
+			return new List<ulong>(Friends.Call<ulong[]>("GetFriends", playerUID));
         }
 
         #endregion
@@ -242,7 +293,7 @@ namespace Oxide.Plugins
             return playersCurrentTeam != null;
         }
 
-        private List<BasePlayer> GetTeamMembers(ulong playerUID)
+        private List<ulong> GetTeamMembers(ulong playerUID)
         {
             var membersList = new List<BasePlayer>();
 
@@ -250,16 +301,7 @@ namespace Oxide.Plugins
 
             var playersCurrentTeam = RelationshipManager.Instance.FindTeam(player.currentTeam);
 
-            var teamMembers = playersCurrentTeam.members;
-
-            foreach (var teamMemberUID in teamMembers)
-            {
-                var teamMember = RustCore.FindPlayerById(teamMemberUID);
-
-                membersList.Add(teamMember);
-            }
-
-            return membersList;
+			return playersCurrentTeam.members;
         }
 
         #endregion
@@ -290,20 +332,19 @@ namespace Oxide.Plugins
                     {
                         if (permission.UserHasPermission(playerUID, "blueprintshare.toggle"))
                         {
-							player.Reply(GetLangValue("Prefix", playerUID) + GetLangValue((sharingEnabled) ? "ToggleOffMessage" : "ToggleOnMessage", playerUID));
-							sharingEnabled = !sharingEnabled;
+							var hasSharingEnabled = SharingEnabled(playerUID);
+							player.Reply(GetLangValue("Prefix", playerUID) + GetLangValue((hasSharingEnabled) ? "ToggleOffMessage" : "ToggleOnMessage", playerUID));
 
-							if ((enabledByDefault && !sharingEnabled) ||
-								(!enabledByDefault && sharingEnabled))
+							if ((enabledByDefault && hasSharingEnabled) ||
+								(!enabledByDefault && !hasSharingEnabled))
 							{
-								playersDataList.Add(playerUID);
+								storedData.Toggle.Add(playerUID);
 							}
 							else
 							{
-								playersDataList.Remove(playerUID);
+								storedData.Toggle.Remove(playerUID);
 							}
-
-                            playersData.WriteObject(playersDataList);
+							storedData.Write();
                         }
                         else
                         {
@@ -322,7 +363,7 @@ namespace Oxide.Plugins
 
         #region API
 
-        private bool SharingEnabled(string playerUID) => playersDataList.Contains(playerUID) ? !enabledByDefault : enabledByDefault;
+        private bool SharingEnabled(string playerUID) => storedData.Toggle.Contains(playerUID) ? !enabledByDefault : enabledByDefault;
 
         #endregion
     }
